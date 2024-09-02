@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Data-Free Knowledge Distillation for Heterogeneous Federated Learning
 
 Research code that accompanies the paper [Data-Free Knowledge Distillation for Heterogeneous Federated](https://arxiv.org/pdf/2105.10056.pdf).
@@ -53,3 +54,7 @@ For the input attribute **algorithms**, list the name of algorithms and separate
 ```
   python main_plot.py --dataset EMnist-alpha0.1-ratio0.1 --algorithms FedAvg,FedGen --batch_size 32 --local_epochs 20 --num_users 10 --num_glob_iters 200 --plot_legend 1
 ```
+=======
+# FedHAG
+This is the official code for FedHAG.
+>>>>>>> 263fe00911b0f6e7d3d3683fd90a30482c88b8c2
