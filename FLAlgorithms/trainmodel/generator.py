@@ -33,14 +33,14 @@ class Generator(nn.Module):
         self.fc_layers = nn.ModuleList()
         for i in range(len(self.fc_configs) - 1):
             input_dim, out_dim = self.fc_configs[i], self.fc_configs[i + 1]
-            print("Build layer {} X {}".format(input_dim, out_dim))
+            #print("Build layer {} X {}".format(input_dim, out_dim))
             fc = nn.Linear(input_dim, out_dim)
             bn = nn.BatchNorm1d(out_dim)
             act = nn.ReLU()
             self.fc_layers += [fc, bn, act]
         ### Representation layer
         self.representation_layer = nn.Linear(self.fc_configs[-1], self.latent_dim)
-        print("Build last layer {} X {}".format(self.fc_configs[-1], self.latent_dim))
+        #print("Build last layer {} X {}".format(self.fc_configs[-1], self.latent_dim))
 
     def forward(self, labels, latent_layer_idx=0, prior=None, verbose=True):
         """
@@ -76,6 +76,7 @@ class Generator(nn.Module):
 
         # Pass through fully connected layers
         for layer in self.fc_layers:
+            #print(layer)
             z = layer(z)
 
         # Generate the final representation or output
@@ -107,12 +108,16 @@ class Discriminator(nn.Module):
         self.fc_configs = [input_dim, self.hidden_dim, 1]  # The final output is a single value (real or fake)
         self.build_network()
 
+    def get_number_of_parameters(self):
+        pytorch_total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return pytorch_total_params
+
     def build_network(self):
         ### FC modules ####
         self.fc_layers = nn.ModuleList()
         for i in range(len(self.fc_configs) - 1):
             input_dim, out_dim = self.fc_configs[i], self.fc_configs[i + 1]
-            print("Build layer {} X {}".format(input_dim, out_dim))
+            #print("Build layer {} X {}".format(input_dim, out_dim))
             fc = nn.Linear(input_dim, out_dim)
             bn = nn.BatchNorm1d(out_dim) if i < len(self.fc_configs) - 2 else None
             act = nn.LeakyReLU(0.2) if i < len(self.fc_configs) - 2 else None

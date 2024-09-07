@@ -19,6 +19,8 @@ import copy
 import torch.nn.functional as F
 from sklearn.metrics import mean_squared_error,mean_absolute_error,r2_score
 from FLAlgorithms.users.userbase import User
+from utils.model_utils import read_data, read_user_data, aggregate_user_data, create_generative_model, create_discriminator_model
+from utils.model_utils import get_dataset_name, RUNCONFIGS
 
 
 
@@ -264,8 +266,29 @@ class Het_LocalUpdate(object):
         self.update_prior = args.update_prior > 0
         self.update_net_preproc = args.update_net_preproc > 0
         self.update_global_representation = current_iter > args.start_optimize_rep
+
+        self.ensemble_lr = 1e-4
+        self.weight_decay = 1e-2
+    
+
+        # 生成器和判别器
+        self.generator_model = create_generative_model(args.dataset, args.algorithm, args.embedding)#生成器模型
+        self.discriminator_model = create_discriminator_model(args.dataset, args.algorithm, args.embedding) # 判别器模型
+        self.latent_layer_idx = self.generator_model.latent_layer_idx
+        self.generator_optimizer = torch.optim.Adam(
+            params=self.generator_model.parameters(),
+            lr=self.ensemble_lr, betas=(0.9, 0.999),
+            eps=1e-08, weight_decay=self.weight_decay, amsgrad=False)
+        self.discriminator_optimizer = torch.optim.Adam(
+            params=self.discriminator_model.parameters(),
+            lr=self.ensemble_lr, betas=(0.9, 0.999),
+            eps=1e-08, weight_decay=self.weight_decay, amsgrad=False)
+        self.generative_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer=self.generator_optimizer, gamma=0.98)
+        self.discriminator_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer=self.discriminator_optimizer, gamma=0.98)
         
-    def train(self, net, net_preproc, w_glob_keys, last=False, dataset_test=None, 
+    def train(self, net, net_preproc, w_glob_keys, g_glob, d_glob, user, global_mean, global_variance, personalized, regularization, last=False, dataset_test=None, 
               prior=None,ind=-1, idx=-1, lr=0.1):
         bias_p=[]
         weight_p=[]
@@ -378,13 +401,95 @@ class Het_LocalUpdate(object):
                             param.requires_grad = False
                         else:
                             param.requires_grad = True   
+
+                # CGAN #######################
+                g_local, d_local = self.local_train_generator(g_glob, d_glob, prior, im_out, target, latent_layer_idx=self.latent_layer_idx)
+                ##################################
+
+                # user.train ##################
+                w_local=user.train(
+                         net, im_out.detach(), target, global_mean, global_variance, regularization, prior,
+                         personalized)#计算本地模型的总损失，包括预测损失、教师损失和潜在损失。这一个过程只更新本地模型参数
+
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
         set_requires_grad(net_preproc, requires_grad=True)
         #set_requires_grad(net, requires_grad=True)
         prior.mu_temp += mu_local.detach()
         prior.n_update += 1
-        return net.state_dict(), sum(epoch_loss) / len(epoch_loss), self.indd,epoch_loss,loss_W
+        return net.state_dict(), sum(epoch_loss) / len(epoch_loss), self.indd, epoch_loss, loss_W, g_local, d_local
 
+    # 改成本地训练的函数,移到local.train中
+    def local_train_generator(self, g_glob, d_glob, prior, im_out, target, latent_layer_idx=0):
+        """
+        本地训练生成器和判别器，返回g_loss与d_loss
+        """
+
+        def update_generator_():
+
+            if(g_glob):
+                # 在本地训练开始之前，从服务器获取全局模型并更新本地模型
+                self.generator_model.load_state_dict(g_glob)
+            if(d_glob):
+                # 在本地训练开始之前，从服务器获取全局模型并更新本地模型
+                self.discriminator_model.load_state_dict(d_glob)
+        
+            self.generator_model.train()
+            self.discriminator_model.train()
+            
+            self.generator_optimizer.zero_grad()
+
+            y = target
+
+            ## feed to generator
+            gen_result=self.generator_model(y, latent_layer_idx=latent_layer_idx, prior=prior,verbose=True)
+            # get approximation of Z( latent) if latent set to True, X( raw image) otherwise
+            gen_output, eps=gen_result['output'], gen_result['eps']
+            #print("gen_output:",gen_output.shape)
+
+            # Pass generated data through discriminator
+            fake_score = self.discriminator_model(gen_output, y)
+
+            # Again pass generated data through discriminator
+            g_loss = torch.mean(torch.nn.functional.binary_cross_entropy_with_logits(fake_score, torch.ones_like(fake_score)))
+            g_loss.backward()
+            self.generator_optimizer.step()
+
+            self.discriminator_optimizer.zero_grad()
+
+            # 进行判别器的训练
+            real_score = self.discriminator_model(im_out.detach(), y)
+            fake_score = self.discriminator_model(gen_output.detach(), y)
+            d_loss_real = torch.mean(torch.nn.functional.binary_cross_entropy_with_logits(real_score, torch.ones_like(real_score)))
+            d_loss_fake = torch.mean(torch.nn.functional.binary_cross_entropy_with_logits(fake_score, torch.zeros_like(fake_score)))
+            
+            d_loss = 0.5 * (d_loss_real + d_loss_fake)
+            d_loss.backward()
+            self.discriminator_optimizer.step()
+
+
+            #TEACHER_LOSS += self.ensemble_alpha * teacher_loss#(torch.mean(TEACHER_LOSS.double())).item()
+            #STUDENT_LOSS += self.ensemble_beta * student_loss#(torch.mean(student_loss.double())).item()这一项一直没有用
+            #DIVERSITY_LOSS += self.ensemble_eta * diversity_loss#(torch.mean(diversity_loss.double())).item()
+            #return TEACHER_LOSS, STUDENT_LOSS, DIVERSITY_LOSS
+            return d_loss, g_loss, self.generator_model.state_dict(), self.discriminator_model.state_dict()
+
+        #
+        d_loss, g_loss, g_local, d_local =update_generator_()
+
+        # TEACHER_LOSS = TEACHER_LOSS.detach().numpy() / (self.n_teacher_iters * epoches)
+        # STUDENT_LOSS = STUDENT_LOSS.detach().numpy() / (self.n_teacher_iters * epoches)
+        # DIVERSITY_LOSS = DIVERSITY_LOSS.detach().numpy() / (self.n_teacher_iters * epoches)
+        # info="Generator: Teacher Loss= {:.4f}, Student Loss= {:.4f}, Diversity Loss = {:.4f}, ". \
+        #     format(TEACHER_LOSS, STUDENT_LOSS, DIVERSITY_LOSS)
+        # if verbose:
+        #     print(info)
+        info="Generator Loss= {:.4f}, Discriminator Loss= {:.4f}, ". \
+                format(g_loss, d_loss)
+        #print(info)
+        self.generative_lr_scheduler.step()
+        self.discriminator_lr_scheduler.step()
+
+        return g_local, d_local
 
 
 def het_test_img_local(net_g, net_preproc, user_data, args,idx=None,indd=None, user_idx=-1, idxs=None):

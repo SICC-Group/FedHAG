@@ -26,7 +26,7 @@ def get_preproc_model(args, dim_in, dim_out=2):
     # 确保 dim_in 是有效的
     if dim_in <= 0:
         raise ValueError("dim_in must be a positive integer")
-    net_preproc = MLPReg_preproc(dim_in, args.n_hidden, dim_out = args.dim_latent)
+    net_preproc = MLPReg_preproc(dim_in, args.n_hidden, dim_out = dim_out)
 
     return net_preproc
 

@@ -132,8 +132,8 @@ class MLP(nn.Module):
     def __init__(self, input_size):
         super(MLP, self).__init__()
         self.relu = nn.ReLU()
-        self.fc1 = nn.Linear(input_size, 32)
-        self.fc2 = nn.Linear(32, 1)
+        self.fc1 = nn.Linear(input_size, 54)
+        self.fc2 = nn.Linear(54, 1)
 
     def forward(self, x, start_layer_idx=0):
         x = x.float()  # 将 x 转换为 float 类型
