@@ -11,6 +11,7 @@ from utils.model_utils import get_dataset_name
 #from torch.nn.modules.loss import RKLDivLoss
 from utils.model_config import RUNCONFIGS
 from FLAlgorithms.optimizers.fedoptimizer import pFedIBOptimizer
+from sklearn.metrics import r2_score
 from sklearn.decomposition import PCA
 
 class User:
@@ -170,12 +171,14 @@ class User:
             # 计算 MSE 并累加
             mse = torch.mean((output - y) ** 2).item()  # 计算当前批次的 MSE
             total_mse += mse * y.size(0)  # 累加每个样本的 MSE
-
+            r2=r2_score(y.detach().numpy(), output.detach().numpy())
+            total_r2 =r2 * y.size(0)
             num_samples += y.size(0)  # 统计样本总数
 
         average_loss = total_loss / num_samples  # 计算平均损失
         average_mse = total_mse / num_samples  # 计算平均 MSE
-        return average_mse, average_loss, num_samples
+        average_r2 = total_r2 / num_samples
+        return average_mse, average_loss, average_r2,num_samples
 
 
 

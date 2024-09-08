@@ -161,22 +161,23 @@ class Server:
         '''
         num_samples = []
         tot_correct = []
+        tot_r2=[]
         losses = []
         users = self.selected_users if selected else self.users
         for user_idx,c in enumerate(users):
-            if net_preprocs[user_idx] is None:
-                ct, c_loss, ns = c.test(n=self.dim_latent)               
+            if net_preprocs is None:
+                ct, c_loss, r2,ns = c.test(n=self.dim_latent)               
             else:
-                m=c.train_data[0]
-                n=m[0].shape
-                ct, c_loss, ns = c.test(net_glob=net_glob,net_preproc=net_preprocs[user_idx], n=n[0])
+                
+                ct, c_loss, r2,ns = c.test(net_glob=net_glob,net_preproc=net_preprocs, n=self.dim_latent)
             #ct, c_loss, ns = c.test(net_preprocs)
             tot_correct.append(ct*1.0)
+            tot_r2.append(r2*1.0)
             num_samples.append(ns)
             losses.append(c_loss)
         ids = [c.id for c in self.users]
 
-        return ids, num_samples, tot_correct, losses
+        return ids, num_samples, tot_correct, tot_r2,losses
 
 
 
@@ -239,12 +240,14 @@ class Server:
 
     def evaluate(self, net_glob,net_preprocs,save=True, selected=False):
         # override evaluate function to log vae-loss.
-        test_ids, test_samples, test_accs, test_losses = self.test(selected=selected,net_glob=net_glob,net_preprocs=net_preprocs)
+        test_ids, test_samples, test_accs, test_r2,test_losses = self.test(selected=selected,net_glob=net_glob,net_preprocs=net_preprocs)
         glob_acc = np.sum(test_accs)*1.0/3.0#修改
+        glob_r2= np.sum(test_r2)*1.0/3.0
         #glob_loss = np.sum([x * y for (x, y) in zip(test_samples, test_losses)]).item() / np.sum(test_samples)
         glob_loss = np.sum([x * y for (x, y) in zip(test_samples, test_losses)]).item() / np.sum(test_samples)#修改
         if save:
             self.metrics['glob_mse'].append(glob_acc)
             self.metrics['glob_loss'].append(glob_loss)
-        print("Average Global Accurancy = {:.4f}, Loss = {:.2f}.".format(glob_acc, glob_loss))
+            self.metrics['glob_r2'].append(glob_r2)
+        print("Average Global Accurancy = {:.4f}, Loss = {:.2f},r2={:2f}.".format(glob_acc, glob_loss,glob_r2))
 

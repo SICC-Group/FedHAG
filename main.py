@@ -53,9 +53,9 @@ if __name__ == "__main__":
     #parser.add_argument("--model", type=str, default="cnn")#改成MLP
     parser.add_argument("--train", type=int, default=1, choices=[0,1])
     parser.add_argument("--algorithm", type=str, default="pFedHAG")
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--preproc_batch_size", type=int, default=128)
-    parser.add_argument("--gen_batch_size", type=int, default=32, help='number of samples from generator')#这个也需要改
+    parser.add_argument("--gen_batch_size", type=int, default=64, help='number of samples from generator')#这个也需要改
     parser.add_argument("--learning_rate", type=float, default=0.01, help="Local learning rate")
     parser.add_argument("--personal_learning_rate", type=float, default=0.01, help="Personalized learning rate to caculate theta aproximately using K steps")
     parser.add_argument("--ensemble_lr", type=float, default=1e-4, help="Ensemble learning rate.")
@@ -93,9 +93,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--model_type', type=str, default='reg', help="choosing the global model, [classif, no-hlayers, 2-hlayers]")
     parser.add_argument('--n_hidden', type=int, default=64, help="number of units in hidden layers")
-    parser.add_argument('--dim_latent', type=int, default=54, help="latent dimension")
+    parser.add_argument('--dim_latent', type=int, default=16, help="latent dimension")
     parser.add_argument('--align_epochs', type=int, default=100, help="number of epochs for alignment during pretraining")
-    parser.add_argument('--align_epochs_altern', type=int, default=3, help="number of epochs for alignment during alternate")
+    parser.add_argument('--align_epochs_altern', type=int, default=5, help="number of epochs for alignment during alternate")
     parser.add_argument('--align_lr', type=float, default=0.001, help="learning rate of alignment ")
     parser.add_argument('--align_bs', type=int, default=10, help="batch_size for alignment")
     parser.add_argument('--distance', type=str, default='wd', help="distance for alignment")

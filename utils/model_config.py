@@ -20,7 +20,7 @@ GENERATORCONFIGS = {
     'celeb': (128, 32, 3, 2, 32),
     'mnist': (256, 32, 1, 10, 32),
     #'material': (54, 32, 1, 32),
-    'material': (54, 54, 1, 54),
+    'material': (16, 16, 1, 16),
     'mnist-cnn0': (256, 32, 1, 10, 64),
     'mnist-cnn1': (128, 32, 1, 10, 32),
     'mnist-cnn2': (64, 32, 1, 10, 32),

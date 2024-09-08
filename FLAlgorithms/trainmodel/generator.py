@@ -61,12 +61,11 @@ class Generator(nn.Module):
            eps = torch.rand((batch_size, self.noise_dim))  # Sampling from Gaussian
         else:
            eps = prior.sampling_gaussian(batch_size, prior.mu, prior.logvar)
-           eps= self.representation_layer(eps)
+           
         # Adjust eps shape to (self.noise_dim, batch_size)
         #eps = eps.permute(1, 0)  # Swap dimensions
 
-        if verbose:
-           result['eps'] = eps
+        
 
          # For regression tasks, use the labels directly as input
         y_input = labels.float().view(batch_size, -1)  # Ensure labels are float and have correct shape
@@ -81,7 +80,9 @@ class Generator(nn.Module):
 
         # Generate the final representation or output
         z = self.representation_layer(z)
-    
+        eps= self.representation_layer(eps)
+        if verbose:
+           result['eps'] = eps
         # Adjust the output shape to be (self.noise_dim, batch_size)
         result['output'] = z  # Swap dimensions
         return result
@@ -104,7 +105,7 @@ class Discriminator(nn.Module):
         print("Dataset {}".format(dataset))
         self.embedding = embedding
         self.hidden_dim, self.latent_dim, self.input_channel, self.noise_dim = GENERATORCONFIGS[dataset]
-        input_dim = self.latent_dim +1 if not self.embedding else self.latent_dim * 2 + 1  # +1 for label, if not using embedding
+        input_dim = self.noise_dim +1 if not self.embedding else self.noise_dim * 2 + 1  # +1 for label, if not using embedding
         self.fc_configs = [input_dim, self.hidden_dim, 1]  # The final output is a single value (real or fake)
         self.build_network()
 

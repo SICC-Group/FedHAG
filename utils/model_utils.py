@@ -15,7 +15,7 @@ from FLAlgorithms.trainmodel.models1 import Net2
 from torch.utils.data import DataLoader
 from FLAlgorithms.trainmodel.generator import Generator,Discriminator
 from utils.model_config import *
-METRICS = ['glob_mse', 'per_mse', 'glob_loss', 'per_loss', 'user_train_time', 'server_agg_time']
+METRICS = ['glob_mse', 'per_mse', 'glob_loss', 'glob_r2','per_loss', 'user_train_time', 'server_agg_time']
 
 
 def get_data_dir(dataset):

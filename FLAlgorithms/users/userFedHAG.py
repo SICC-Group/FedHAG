@@ -68,7 +68,7 @@ class UserFedHAG(User):
         del self.label_counts
         self.label_counts = {label:1 for label in range(self.unique_labels)}
 
-    def train(self, net, im_out, target, global_mean, global_variance, regularization, prior, personalized=False):
+    def train(self, net,maptrainloader,iter_maptrainloader,global_mean, global_variance, prior,personalized=False, early_stop=100, regularization=True, verbose=False):
         #self.clean_up_counts()
         net.train()
         self.generative_model.eval()
@@ -78,82 +78,161 @@ class UserFedHAG(User):
         RegressionTracker1= RegressionTracker(self.num_features)
         self.optimizer = torch.optim.Adam(net.parameters(), lr=0.002)
         #self.optimizer1 = torch.optim.Adam(self.model.parameters(), lr=0.002)
-        #for epoch in range(self.local_epochs):
-            #net.train()
-            #for i in range(self.K):
-        self.optimizer.zero_grad()
-        #### sample from real dataset (un-weighted)
-        #samples =self.get_next_train_batch(maptrainloader,iter_maptrainloader)
-        #X, y = samples['X'], samples['y']
-        #f_num=X.shape[1]
-        #y=y.float()
-        #y = y.unsqueeze(-1)
-        #self.update_label_counts(samples['labels'], samples['counts'])
-        model_result=net(im_out.float())
-        user_output_logp = model_result['output']
-        RegressionTracker0.update(user_output_logp.detach())
-        self.RegressionTracker.update(user_output_logp.detach())
-        predictive_loss=self.loss(user_output_logp, target)
-        mean, variance = RegressionTracker0.avg_and_var()
-        
+        for epoch in range(1):
+            net.train()
+            for i in range(self.K):
+                self.optimizer.zero_grad()
+                #### sample from real dataset (un-weighted)
+                samples =self.get_next_train_batch(maptrainloader,iter_maptrainloader)
+                X, y = samples['X'], samples['y']
+                #f_num=X.shape[1]
+                y=y.float()
+                y = y.unsqueeze(-1)
+                #self.update_label_counts(samples['labels'], samples['counts'])
+                model_result=net(X.float())
+                user_output_logp = model_result['output']
+                RegressionTracker0.update(user_output_logp.detach())
+                self.RegressionTracker.update(user_output_logp.detach())
+                predictive_loss=self.loss(user_output_logp, y)
+                mean, variance = RegressionTracker0.avg_and_var()
+                
 
-        #### sample y and generate z
-        if regularization :
-            #self.optimizer1.zero_grad()
-            #self.latent_model.train()
-            #generative_alpha=self.exp_lr_scheduler(glob_iter, decay=0.98, init_lr=self.generative_alpha)
-            #generative_beta=self.exp_lr_scheduler(glob_iter, decay=0.98, init_lr=self.generative_beta)
-            ### get generator output(latent representation) of the same label
+                #### sample y and generate z
+                if regularization and epoch < early_stop:
+                    #self.optimizer1.zero_grad()
+                    #self.latent_model.train()
+                    #generative_alpha=self.exp_lr_scheduler(glob_iter, decay=0.98, init_lr=self.generative_alpha)
+                    #generative_beta=self.exp_lr_scheduler(glob_iter, decay=0.98, init_lr=self.generative_beta)
+                    ### get generator output(latent representation) of the same label
+                    gen_output=self.generative_model(y, latent_layer_idx=self.latent_layer_idx,prior=prior)['output']
+                    logit_given_gen=net(gen_output,start_layer_idx=1)['output']
+                    #target_p=F.softmax(logit_given_gen, dim=1).clone().detach()
+                    RegressionTracker1.update(logit_given_gen.detach())
+                    mean1, variance1 = RegressionTracker1.avg_and_var()
+                    #user_latent_loss= generative_beta * self.ensemble_loss(mean, variance, mean1, variance1)
+                    user_latent_loss= self.ensemble_loss(mean, variance, mean1, variance1)
 
-            gen_output=self.generative_model(target, latent_layer_idx=self.latent_layer_idx,prior=prior)['output']
-            logit_given_gen=net(gen_output,start_layer_idx=1)['output']
-            #target_p=F.softmax(logit_given_gen, dim=1).clone().detach()
-            RegressionTracker1.update(logit_given_gen.detach())
-            # 添加的使用生成器生成数据进行训练对y的loss
-            gen_predictive_loss=self.loss(logit_given_gen, target)
-            #mean1, variance1 = RegressionTracker1.avg_and_var()
-            #user_latent_loss= generative_beta * self.ensemble_loss(mean, variance, mean1, variance1)
-            #user_latent_loss= self.ensemble_loss(mean, variance, mean1, variance1)
+                    reg_loss = self.ensemble_loss(global_mean, global_variance, mean, variance)
 
-            reg_loss = self.ensemble_loss(global_mean, global_variance, mean, variance)
-
-            # 下面这段可以注释：
-            #sampled_y=torch.randn(32) * global_variance.sqrt() + global_mean
-            #sampled_y=sampled_y.clone().detach()
-            #gen_result=self.generative_model(sampled_y, latent_layer_idx=self.latent_layer_idx,prior=prior)
-            #gen_output=gen_result['output'] # latent representation when latent = True, x otherwise
-            #user_output_logp =net(gen_output,start_layer_idx=1)['output']
-            # teacher_loss =  generative_alpha * torch.mean(
-            #     self.generative_model.dist_loss(user_output_logp, sampled_y.unsqueeze(-1))
-            # )
-            #teacher_loss = torch.mean(self.generative_model.dist_loss(user_output_logp, sampled_y.unsqueeze(-1)))
-            # this is to further balance oversampled down-sampled synthetic data
-            #gen_ratio = self.gen_batch_size / self.batch_size
-            ##################################
-            # loss加上使用生成器生成的样本预测y的loss，删除teacher_loss和user_latent_loss
-            loss=0.5*predictive_loss + 0.2*reg_loss + 0.3*gen_predictive_loss
-        #loss=0.5*predictive_loss + 0.2*reg_loss+0.2* teacher_loss + 0.1*user_latent_loss
-        #TEACHER_LOSS+=teacher_loss
-        #LATENT_LOSS+=user_latent_loss
-        else:
-            #### get loss and perform optimization
-            loss=predictive_loss
-        loss.backward()
-        self.optimizer.step()#self.local_model)
-        #if regularization and epoch < early_stop:
-            #self.optimizer1.step()
+                    sampled_y=torch.randn(64) * global_variance.sqrt() + global_mean
+                    sampled_y=sampled_y.clone().detach()
+                    gen_result=self.generative_model(sampled_y, latent_layer_idx=self.latent_layer_idx,prior=prior)
+                    gen_output=gen_result['output'] # latent representation when latent = True, x otherwise
+                    user_output_logp =net(gen_output,start_layer_idx=1)['output']
+                    # teacher_loss =  generative_alpha * torch.mean(
+                    #     self.generative_model.dist_loss(user_output_logp, sampled_y.unsqueeze(-1))
+                    # )
+                    teacher_loss = torch.mean(self.generative_model.dist_loss(user_output_logp, sampled_y.unsqueeze(-1)))
+                    # this is to further balance oversampled down-sampled synthetic data
+                    gen_ratio = self.gen_batch_size / self.batch_size
+                    loss=predictive_loss + 0.5*reg_loss+0.5* teacher_loss + 0.5*user_latent_loss
+                    TEACHER_LOSS+=teacher_loss
+                    LATENT_LOSS+=user_latent_loss
+                else:
+                    #### get loss and perform optimization
+                    loss=predictive_loss
+                loss.backward()
+                self.optimizer.step()#self.local_model)
+                #if regularization and epoch < early_stop:
+                   #self.optimizer1.step()
         # local-model <=== self.model
         self.clone_model_paramenter(net.parameters(), self.local_model)
         if personalized:
             self.clone_model_paramenter(net.parameters(), self.personalized_model_bar)
         #self.lr_scheduler.step(glob_iter)
-        # if regularization and verbose:
-        #     TEACHER_LOSS=TEACHER_LOSS.detach().numpy() / (self.local_epochs * self.K)
-        #     LATENT_LOSS=LATENT_LOSS.detach().numpy() / (self.local_epochs * self.K)
-        #     info='\nUser Teacher Loss={:.4f}'.format(TEACHER_LOSS)
-        #     info+=', Latent Loss={:.4f}'.format(LATENT_LOSS)
-        #     print(info)
+        if regularization and verbose:
+            TEACHER_LOSS=TEACHER_LOSS.detach().numpy() / (self.local_epochs * self.K)
+            LATENT_LOSS=LATENT_LOSS.detach().numpy() / (self.local_epochs * self.K)
+            info='\nUser Teacher Loss={:.4f}'.format(TEACHER_LOSS)
+            info+=', Latent Loss={:.4f}'.format(LATENT_LOSS)
+            #print(info)
         return net.state_dict()
+    # def train(self, net, im_out, target, global_mean, global_variance, regularization, prior, personalized=False):
+    #     #self.clean_up_counts()
+    #     net.train()
+    #     self.generative_model.eval()
+    #     #self.latent_model.eval()
+    #     TEACHER_LOSS, DIST_LOSS, LATENT_LOSS = 0, 0, 0
+    #     RegressionTracker0 = RegressionTracker(self.num_features)
+    #     RegressionTracker1= RegressionTracker(self.num_features)
+    #     self.optimizer = torch.optim.Adam(net.parameters(), lr=0.002)
+    #     #self.optimizer1 = torch.optim.Adam(self.model.parameters(), lr=0.002)
+    #     #for epoch in range(self.local_epochs):
+    #         #net.train()
+    #         #for i in range(self.K):
+    #     self.optimizer.zero_grad()
+    #     #### sample from real dataset (un-weighted)
+    #     #samples =self.get_next_train_batch(maptrainloader,iter_maptrainloader)
+    #     #X, y = samples['X'], samples['y']
+    #     #f_num=X.shape[1]
+    #     #y=y.float()
+    #     #y = y.unsqueeze(-1)
+    #     #self.update_label_counts(samples['labels'], samples['counts'])
+    #     model_result=net(im_out.float())
+    #     user_output_logp = model_result['output']
+    #     RegressionTracker0.update(user_output_logp.detach())
+    #     self.RegressionTracker.update(user_output_logp.detach())
+    #     predictive_loss=self.loss(user_output_logp, target)
+    #     mean, variance = RegressionTracker0.avg_and_var()
+        
+
+    #     #### sample y and generate z
+    #     if regularization :
+    #         #self.optimizer1.zero_grad()
+    #         #self.latent_model.train()
+    #         #generative_alpha=self.exp_lr_scheduler(glob_iter, decay=0.98, init_lr=self.generative_alpha)
+    #         #generative_beta=self.exp_lr_scheduler(glob_iter, decay=0.98, init_lr=self.generative_beta)
+    #         ### get generator output(latent representation) of the same label
+
+    #         gen_output=self.generative_model(target, latent_layer_idx=self.latent_layer_idx,prior=prior)['output']
+    #         logit_given_gen=net(gen_output,start_layer_idx=1)['output']
+    #         #target_p=F.softmax(logit_given_gen, dim=1).clone().detach()
+    #         RegressionTracker1.update(logit_given_gen.detach())
+    #         # 添加的使用生成器生成数据进行训练对y的loss
+    #         gen_predictive_loss=self.loss(logit_given_gen, target)
+    #         #mean1, variance1 = RegressionTracker1.avg_and_var()
+    #         #user_latent_loss= generative_beta * self.ensemble_loss(mean, variance, mean1, variance1)
+    #         #user_latent_loss= self.ensemble_loss(mean, variance, mean1, variance1)
+
+    #         reg_loss = self.ensemble_loss(global_mean, global_variance, mean, variance)
+
+    #         # 下面这段可以注释：
+    #         #sampled_y=torch.randn(32) * global_variance.sqrt() + global_mean
+    #         #sampled_y=sampled_y.clone().detach()
+    #         #gen_result=self.generative_model(sampled_y, latent_layer_idx=self.latent_layer_idx,prior=prior)
+    #         #gen_output=gen_result['output'] # latent representation when latent = True, x otherwise
+    #         #user_output_logp =net(gen_output,start_layer_idx=1)['output']
+    #         # teacher_loss =  generative_alpha * torch.mean(
+    #         #     self.generative_model.dist_loss(user_output_logp, sampled_y.unsqueeze(-1))
+    #         # )
+    #         #teacher_loss = torch.mean(self.generative_model.dist_loss(user_output_logp, sampled_y.unsqueeze(-1)))
+    #         # this is to further balance oversampled down-sampled synthetic data
+    #         #gen_ratio = self.gen_batch_size / self.batch_size
+    #         ##################################
+    #         # loss加上使用生成器生成的样本预测y的loss，删除teacher_loss和user_latent_loss
+    #         loss=predictive_loss + 0.5*reg_loss + 0.5*gen_predictive_loss
+    #     #loss=0.5*predictive_loss + 0.2*reg_loss+0.2* teacher_loss + 0.1*user_latent_loss
+    #     #TEACHER_LOSS+=teacher_loss
+    #     #LATENT_LOSS+=user_latent_loss
+    #     else:
+    #         #### get loss and perform optimization
+    #         loss=predictive_loss
+    #     loss.backward()
+    #     self.optimizer.step()#self.local_model)
+    #     #if regularization and epoch < early_stop:
+    #         #self.optimizer1.step()
+    #     # local-model <=== self.model
+    #     self.clone_model_paramenter(net.parameters(), self.local_model)
+    #     if personalized:
+    #         self.clone_model_paramenter(net.parameters(), self.personalized_model_bar)
+    #     #self.lr_scheduler.step(glob_iter)
+    #     # if regularization and verbose:
+    #     #     TEACHER_LOSS=TEACHER_LOSS.detach().numpy() / (self.local_epochs * self.K)
+    #     #     LATENT_LOSS=LATENT_LOSS.detach().numpy() / (self.local_epochs * self.K)
+    #     #     info='\nUser Teacher Loss={:.4f}'.format(TEACHER_LOSS)
+    #     #     info+=', Latent Loss={:.4f}'.format(LATENT_LOSS)
+    #     #     print(info)
+    #     return net.state_dict()
 
     def adjust_weights(self, samples):
         labels, counts = samples['labels'], samples['counts']

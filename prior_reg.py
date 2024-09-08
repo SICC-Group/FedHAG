@@ -13,10 +13,10 @@ import matplotlib.pyplot as plt
 
 # Regularizer used in proximal-relational autoencoder
 class Prior(nn.Module):
-    def __init__(self, z_dim, mean_var=3):
+    def __init__(self, z_dim, total_mean_train):
         super(Prior, self).__init__()
         self.z_dim = z_dim
-        self.mu_init = torch.randn(z_dim) * mean_var
+        self.mu_init = total_mean_train
         self.mu = self.mu_init.clone()
         #self.logvar = torch.ones(data_size)
         self.logvar = torch.zeros(z_dim)

@@ -21,6 +21,8 @@ from sklearn.metrics import mean_squared_error,mean_absolute_error,r2_score
 from FLAlgorithms.users.userbase import User
 from utils.model_utils import read_data, read_user_data, aggregate_user_data, create_generative_model, create_discriminator_model
 from utils.model_utils import get_dataset_name, RUNCONFIGS
+from sklearn.decomposition import PCA
+from torch.utils.data import TensorDataset, DataLoader
 
 
 
@@ -187,6 +189,27 @@ def wass_loss(net_projector, data, target, prior, optimize_projector=True, dista
 
     return loss
 
+def aggregate_models(net_preprocs, user_data, global_model, args):
+    # 初始化全局模型的权重
+    global_state_dict = copy.deepcopy(net_preprocs[0].state_dict())
+
+    # 初始化聚合参数为 0
+    for key in global_state_dict.keys():
+        global_state_dict[key] = torch.zeros_like(global_state_dict[key])
+
+    total_data_points = sum([len(user_data[i]) for i in range(args.num_users)])  # 计算总的数据量
+    user_weights = [len(user_data[i]) / total_data_points for i in range(args.num_users)]  # 计算每个用户的数据权重
+
+    # 遍历每个用户的模型，逐步加权平均
+    for i in range(args.num_users):
+        local_state_dict = net_preprocs[i].state_dict()
+        for key in global_state_dict.keys():
+            global_state_dict[key] += local_state_dict[key] * user_weights[i]  # 加权参数
+    
+    # 将聚合后的参数赋值给全局模型
+    global_model.load_state_dict(global_state_dict)
+
+    return global_model
 
 def train_preproc(net_preprocs, user_data, prior,n_epochs,args=None,verbose=True):
     
@@ -288,7 +311,7 @@ class Het_LocalUpdate(object):
         self.discriminator_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
             optimizer=self.discriminator_optimizer, gamma=0.98)
         
-    def train(self, net, net_preproc, w_glob_keys, g_glob, d_glob, user, global_mean, global_variance, personalized, regularization, last=False, dataset_test=None, 
+    def train(self, glob_iter,net, net_preproc, w_glob_keys, g_glob, d_glob, user, global_mean, global_variance, personalized, regularization, last=False, dataset_test=None, 
               prior=None,ind=-1, idx=-1, lr=0.1):
         bias_p=[]
         weight_p=[]
@@ -323,14 +346,14 @@ class Het_LocalUpdate(object):
         prior.mu_temp = prior.mu_temp.to(self.args.device)  
         optimizer_preproc = torch.optim.Adam(net_preproc.parameters(),lr=self.args.align_lr)
         # 10
-        for iter in range(local_eps):
+        for loiter in range(local_eps):
             net_preproc.train()
             net.train()
             #net_projector.eval()
             batch_loss = []
             for batch_idx, (data, target) in enumerate(self.dataset):
                 # first 9 round
-                if (iter < head_eps ) or last or not w_glob_keys:
+                if (loiter < head_eps ) or last or not w_glob_keys:
                     # update net_preproc parameter
                     if self.update_net_preproc:
                         set_requires_grad(net_preproc, requires_grad=True)
@@ -341,7 +364,7 @@ class Het_LocalUpdate(object):
                         else:
                             param.requires_grad = True
                 #last round
-                elif (iter >= head_eps ):
+                elif (loiter >= head_eps ):
                     # not update net_preproc parameter
                     set_requires_grad(net_preproc, requires_grad=False)
                     # update net parameter
@@ -405,18 +428,27 @@ class Het_LocalUpdate(object):
                 # CGAN #######################
                 g_local, d_local = self.local_train_generator(g_glob, d_glob, prior, im_out, target, latent_layer_idx=self.latent_layer_idx)
                 ##################################
-
+                im_out = net_preproc(data)
                 # user.train ##################
+                mapdataset = TensorDataset(im_out.detach(), target)
+                #mapdataset_nums = len(mapdataset)
+                maptrainloader = DataLoader(mapdataset, self.args.batch_size, shuffle=True, drop_last=True)
+                iter_maptrainloader = iter(maptrainloader)
+                # w_local=user.train(
+                #          net, im_out.detach(), target, global_mean, global_variance, regularization, prior,
+                #          personalized)#计算本地模型的总损失，包括预测损失、教师损失和潜在损失。这一个过程只更新本地模型参数
                 w_local=user.train(
-                         net, im_out.detach(), target, global_mean, global_variance, regularization, prior,
-                         personalized)#计算本地模型的总损失，包括预测损失、教师损失和潜在损失。这一个过程只更新本地模型参数
-
+                         net, maptrainloader,iter_maptrainloader,global_mean, global_variance,prior,
+                         personalized=personalized, 
+                         early_stop=20,
+                         verbose=True and glob_iter > 0,
+                         regularization= glob_iter > 0 )
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
         set_requires_grad(net_preproc, requires_grad=True)
         #set_requires_grad(net, requires_grad=True)
         prior.mu_temp += mu_local.detach()
         prior.n_update += 1
-        return net.state_dict(), sum(epoch_loss) / len(epoch_loss), self.indd, epoch_loss, loss_W, g_local, d_local
+        return w_local, net_preproc,sum(epoch_loss) / len(epoch_loss), self.indd, epoch_loss, loss_W, g_local, d_local
 
     # 改成本地训练的函数,移到local.train中
     def local_train_generator(self, g_glob, d_glob, prior, im_out, target, latent_layer_idx=0):
@@ -510,7 +542,11 @@ def het_test_img_local(net_g, net_preproc, user_data, args,idx=None,indd=None, u
             data, target = data.to(args.device), target.to(args.device)
             
         with torch.no_grad():
-            prediction = net_g(net_preproc(data))
+            pca = PCA(n_components=args.dim_latent)
+            X_pca = pca.fit_transform(data)
+            X_pca = torch.tensor(X_pca, dtype=torch.float32)
+            test_out=net_preproc(X_pca)
+            prediction = net_g(net_preproc(test_out))
         target=target.unsqueeze(-1)
         #log_probs = net_g(net_preproc(data))
         # sum up batch loss
@@ -569,7 +605,7 @@ def het_test_img_local_all(net, net_preprocs, args, users_test_data,w_locals=Non
                     w_local[k] = w_locals[idx][k]
             net_local.load_state_dict(w_local)
         net_local.eval()
-        net_preproc = net_preprocs[idx]
+        net_preproc = net_preprocs
         net_preproc.eval()
 
         mse, rmse, test_loss, mae, r2= het_test_img_local(net_local,net_preproc, users_test_data[idx], args, user_idx=idx) 

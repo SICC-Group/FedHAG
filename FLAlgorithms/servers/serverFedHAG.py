@@ -5,8 +5,9 @@ from FLAlgorithms.trainmodel.RKLDivLoss import RKLDivLoss
 from FLAlgorithms.users.userpFedGen import RegressionTracker
 from utils.model_utils import create_model,convert_data
 from utils.model_utils import read_data, read_user_data, aggregate_user_data, create_generative_model, create_discriminator_model
-from Het_Update import Het_LocalUpdate, het_test_img_local_all, train_preproc
+from Het_Update import Het_LocalUpdate, het_test_img_local_all, train_preproc,aggregate_models
 from Het_Nets import get_reg_model, get_preproc_model
+from sklearn.decomposition import PCA
 from FLAlgorithms.users.userbase import User
 #from FLAlgorithms.users.userbase import clone_model_paramenter
 from torch.utils.data import TensorDataset, DataLoader
@@ -98,9 +99,6 @@ class FedHAG(Server):
         # 生成器和判别器全局模型参数
         g_glob = {}
         d_glob = {}
-
-        times = []
-        times_in = []
         lens = np.ones(args.num_users)
         w_glob_keys = list(itertools.chain.from_iterable(w_glob_keys))
         generator_model_glob = self.generator_model_glob.to(args.device)
@@ -109,8 +107,6 @@ class FedHAG(Server):
         net_glob.train()#11111
         loss_local_full = [[] for _ in range(args.num_users)]
         total_num_layers = len(net_glob.state_dict().keys())#1111
-        print(total_num_layers)
-        print(net_glob.state_dict().keys())
     
         w_locals = {}#11111
         for user in range(args.num_users):#1111111
@@ -118,36 +114,32 @@ class FedHAG(Server):
             for key in net_glob.state_dict().keys():
                 w_local_dict[key] = net_glob.state_dict()[key]
             w_locals[user] = w_local_dict
-
         
-        prior = Prior([args.dim_latent],args.mean_target_variance)
+        mean_train = torch.zeros(args.dim_latent)
+        var_train = torch.zeros(args.dim_latent)
         net_preprocs = {}
         user_data={}
         for user_idx, user in enumerate(self.users): 
-            data_point = user.trainloader.dataset[0]
-            # Check if data_point is a tuple or list (as it seems to be in your case)
-            if isinstance(data_point, (tuple, list)):
-               # Access the first element of the tuple (which is likely the tensor)
-               tensor = data_point[0]
-               # Get the shape of the tensor
-               shape = tensor.shape
-               # Now you can check the dimensions
-               if not isinstance(shape[0], int) or shape[0] <= 0:
-            #        print(f"Invalid shape: {shape}")   
-            # if not isinstance(user.trainloader.dataset[0].tensors.shap[1], int) or user.trainloader.dataset[0].tensors.shap[1] <= 0:
-                raise ValueError(f"The feature number for user {user} is not a valid integer")
-                   # 使用 f_num[user] 作为 dim_in 参数创建模型
-            net_preproc = get_preproc_model(args, dim_in=shape[0], dim_out=args.dim_latent)
+            net_preproc = get_preproc_model(args, dim_in=args.dim_latent, dim_out=args.dim_latent)
             net_preprocs[user_idx]=(net_preproc)
             id = self.data[0][user_idx]
             train_data=self.data[2][id]
             X_train, y_train = convert_data(train_data['x'], train_data['y'], dataset=self.dataset)
-            dataset = TensorDataset(X_train, y_train)
+            pca = PCA(n_components=args.dim_latent)
+            X_pca = pca.fit_transform(X_train)
+            X_pca = torch.tensor(X_pca, dtype=torch.float32)
+            dataset = TensorDataset(X_pca, y_train)
             user_data[user_idx] = DataLoader(dataset=dataset, batch_size=args.preproc_batch_size, drop_last = True, shuffle=True)
+            mean_train+= torch.mean(X_pca, dim=0)  # 每一维的均值
+            var_train+= torch.var(X_pca, dim=0) 
+        total_mean_train=mean_train/args.num_users
+        net_glopreproc = get_preproc_model(args, dim_in=args.dim_latent, dim_out=args.dim_latent)
+        prior = Prior([args.dim_latent],total_mean_train)
         train_preproc(net_preprocs, user_data, prior,
                   n_epochs=args.align_epochs,
                   args=args,
                   verbose=True)
+        net_glopreproc=aggregate_models(net_preprocs, user_data, net_glopreproc, args)
         for glob_iter in range(self.num_glob_iters):
             print("\n\n-------------Round number: ",glob_iter, " -------------\n\n")
             loss_locals = []
@@ -164,7 +156,7 @@ class FedHAG(Server):
 
             if not self.local:
                 self.send_parameters(mode=self.mode)# broadcast averaged prediction model
-            self.evaluate(net_glob,net_preprocs) #输出的是average glocal accurancy，Loss
+            self.evaluate(net_glob,net_glopreproc) #输出的是average glocal accurancy，Loss
             self.send_logits()
             #chosen_verbose_user = np.random.randint(0, len(self.users))
             self.timestamp = time.time() # log user-training start time
@@ -184,10 +176,10 @@ class FedHAG(Server):
             
                 last = glob_iter == args.num_glob_iters
             
-                w_local, loss, indd, last_loss,loss_w, g_local, d_local = local.train(
+                w_local, w_prelocal,loss, indd, last_loss,loss_w, g_local, d_local = local.train(glob_iter,
                                                   # local.train参数
                                                   net=net_local.to(args.device), 
-                                                  net_preproc=net_preprocs[userid].to(args.device),
+                                                  net_preproc=net_glopreproc.to(args.device),
                                                   w_glob_keys=w_glob_keys, 
                                                   # CGAN参数
                                                   g_glob = g_glob,
@@ -205,21 +197,11 @@ class FedHAG(Server):
                                                   prior=prior,
                                                   lr=args.lr, last=last
                                                   )
+                net_preprocs[userid]=w_prelocal
+                loss_locals.append(copy.deepcopy(loss))
+                total_len += lens[userid]
+                loss_local_full[userid] = loss_local_full[userid] + copy.deepcopy(last_loss)
                 print(f"User {userid}, Epoch {glob_iter}, Loss: {loss_w:.4f}")
-                #X_train, y_train = convert_data(user.trainloader.dataset['x'], user.trainloader.dataset['y'], dataset=self.dataset)
-                # net_preprocTD = net_preprocs[userid].to(args.device)
-                # im_out = net_preprocTD(user_data[userid].dataset.tensors[0])
-                # #im_out_list.append(im_out.detach())  # 记录 im_out
-                # mapdataset = TensorDataset(im_out.detach(), user_data[userid].dataset.tensors[1])
-                # #mapdataset_nums = len(mapdataset)
-                # maptrainloader = DataLoader(mapdataset, self.batch_size, shuffle=True, drop_last=True)
-                # iter_maptrainloader = iter(maptrainloader)
-                # w_local=user.train(
-                #          net_local.to(args.device), maptrainloader,iter_maptrainloader,glob_iter, self.global_mean, self.global_variance,prior,
-                #          personalized=self.personalized, 
-                #          early_stop=self.early_stop,
-                #          verbose=True and glob_iter > 0,
-                #          regularization= glob_iter > 0 )#计算本地模型的总损失，包括预测损失、教师损失和潜在损失。这一个过程只更新本地模型参数
                 if len(w_glob) == 0:
                 # first iteration 
                     w_glob = copy.deepcopy(w_local)
@@ -269,9 +251,7 @@ class FedHAG(Server):
 
             self.aggregate_logits()
 
-            loss_locals.append(copy.deepcopy(loss))
-            total_len += lens[userid]
-            loss_local_full[userid] = loss_local_full[userid] + copy.deepcopy(last_loss)
+            
             
         
                 # lens are the weigth of local model when doing averages
@@ -309,22 +289,19 @@ class FedHAG(Server):
 
             prior.mu = prior.mu_temp/ prior.n_update
             prior.init_mu_temp()        
-
-            # if args.align_epochs_altern >0:
-   
-                # prior.mu.requires_grad_(False)
-                # train_preproc(net_preprocs,user_data,prior,
-                #               n_epochs=args.align_epochs_altern,
-                #               args=args,
-                #               verbose=True
-                #               )
             
-                
-            # avg_test_mse, avg_test_rmse, test_loss, avg_test_mae, avg_test_r2 = het_test_img_local_all(net_glob, net_preprocs, args,
-            #                                              user_test_data,
-            #                                             w_glob_keys=w_glob_keys,
-            #                                             w_locals=w_locals,indd=indd)
-            avg_train_mse, avg_train_rmse, train_loss, avg_train_mae, avg_train_r2 = het_test_img_local_all(net_glob, net_preprocs, args,
+            if args.align_epochs_altern >0:
+   
+                prior.mu.requires_grad_(False)
+                train_preproc(net_preprocs,user_data,prior,
+                              n_epochs=args.align_epochs_altern,
+                              args=args,
+                              verbose=True
+                              )
+            
+            net_glopreproc=aggregate_models(net_preprocs, user_data, net_glopreproc, args)
+
+            avg_train_mse, avg_train_rmse, train_loss, avg_train_mae, avg_train_r2 = het_test_img_local_all(net_glob, net_glopreproc, args,
                                                          user_data,
                                                         w_glob_keys=w_glob_keys,
                                                         w_locals=w_locals,indd=indd)
@@ -333,179 +310,14 @@ class FedHAG(Server):
             print('Round {:3d}, Train loss: {:.3f}, Train MSE: {:.3f}, Train RMSE: {:.3f}, Train MAE: {:.3f}, Train R2-score: {:.2f}'.format(
                         glob_iter, train_loss, avg_train_mse, avg_train_rmse, avg_train_mae, avg_train_r2))
             #self.evaluate(net_preprocs)
-            if self.personalized:
-                self.evaluate_personalized_model(net_glob,net_preprocs)
+            # if self.personalized:
+            #     self.evaluate_personalized_model(net_glob,net_preprocs)
 
-            # 聚合生成器和判别器的模型
-            # 聚合生成器模型参数
-            #aggregated_generator_state_dict = self.aggregate_models(g_local, self.num_users)
-            # 聚合判别器模型参数
-            #aggregated_discriminator_state_dict = self.aggregate_models(d_local, self.num_users)
-            # 将聚合后的模型参数加载到全局模型中,记得修改全局生成器和判别器的名称
-            #global_generator.load_state_dict(aggregated_generator_state_dict)
-            #global_discriminator.load_state_dict(aggregated_discriminator_state_dict)
-
-            # self.timestamp = time.time() # log server-agg start time
-
-            # self.train_generator(
-            #     net_glob.to(args.device),self.batch_size, self.global_mean, self.global_variance,prior, im_out_list=im_out_list,  # 传递 im_out_list
-            #     epoches=self.ensemble_epochs // self.n_teacher_iters,
-            #     latent_layer_idx=self.latent_layer_idx,
-            #     verbose=True
-            # ) #更新生成器模型，不更新本地模型参数。其中损失函数包括，教师损失（生成器的输出作为预测模型的输入，得到的预测标签与随机生成标签之间的差别），多样性损失（生成样本与噪声之间的差别）
-            
-            # self.aggregate_parameters()
-            # curr_timestamp=time.time()  # log  server-agg end time
-            # agg_time = curr_timestamp - self.timestamp
-            # self.metrics['server_agg_time'].append(agg_time)
-            #if glob_iter  > 0 and glob_iter % 20 == 0 and self.latent_layer_idx == 0:
-                #self.visualize_images(self.generative_model, glob_iter, repeats=10)
             self.aggregate_parameters()
         self.save_results(args)
         self.save_model()
 
 
-    # 改成本地训练的函数,移到local.train中
-    # # def local_train_generator(self, prior, im_out, target, latent_layer_idx=0):
-    #     """
-    #     Learn a generator that find a consensus latent representation z, given a label 'y'.
-    #     :param batch_size:
-    #     :param epoches:
-    #     :param latent_layer_idx: if set to -1 (-2), get latent representation of the last (or 2nd to last) layer.
-    #     :param verbose: print loss information.
-    #     :return: Do not return anything.
-    #     """
-    #     #self.generative_model.train()
-    #     #self.model.eval()
-    #     #self.generative_regularizer.train()
-    #     #self.label_weights, self.qualified_labels = self.get_label_weights()
-    #     #TEACHER_LOSS, STUDENT_LOSS, DIVERSITY_LOSS, STUDENT_LOSS2 = 0, 0, 0, 0
-    #     #rkl=RKLDivLoss()
-
-    #     def update_generator_():
-    #         #num_features=1
-    #         #RegressionTracker2=RegressionTracker(num_features)
-    #         #RegressionTracker3=RegressionTracker(num_features)
-    #         self.generative_model.train()
-    #         self.discriminator_model.train()
-    #         #student_model.eval()
-    #         #self.latent_model.eval()
-    #         #for i in range(n_iters):
-    #         self.discriminator_optimizer.zero_grad()
-    #         self.generative_optimizer.zero_grad()
-
-    #         # 改成y = target
-    #         #y = torch.randn(batch_size) * global_variance.sqrt() + global_mean
-    #         y = target
-
-    #         #y_input=y
-    #         ## feed to generator
-    #         gen_result=self.generative_model(y, latent_layer_idx=latent_layer_idx, prior=prior,verbose=True)
-    #         # get approximation of Z( latent) if latent set to True, X( raw image) otherwise
-    #         gen_output, eps=gen_result['output'], gen_result['eps']
-
-    #         # 这里对real_score的计算以及对im_out的处理都要再次进行修改
-    #         # 计算总元素数量
-    #         total_elements = im_out.numel()
-
-    #         # 创建目标维度的张量
-    #         target_size = (32, 32)
-    #         target_elements = target_size[0] * target_size[1]
-
-    #         if total_elements >= target_elements:
-    #             # 截取数据并重塑为目标维度
-    #             im_out_preprocessed = im_out.view(-1)[:target_elements].reshape(target_size)
-    #         else:
-    #             # 填充数据并重塑为目标维度
-    #             im_out_preprocessed = torch.zeros(target_size)
-    #             im_out_preprocessed[:im_out.size(0), :im_out.size(1)] = im_out
-    #         # 进行判别器的训练
-    #         d_loss_real = self.discriminator_model(im_out_preprocessed, y)
-    #         #### im_out的处理需要修改
-    #         # Pass generated data through discriminator
-    #         d_loss_fake = self.discriminator_model(gen_output.detach(), y)
-    #         # Compute the loss for the discriminator
-    #         #d_loss_real = torch.mean(torch.nn.functional.binary_cross_entropy_with_logits(real_score, torch.ones_like(real_score)))
-    #         #d_loss_fake = torch.mean(torch.nn.functional.binary_cross_entropy_with_logits(fake_score, torch.zeros_like(fake_score)))
-    #         d_loss = 0.5 * (d_loss_real + d_loss_fake)
-    #         d_loss.backward()
-    #         self.discriminator_optimizer.step()
-
-    #         ##### get losses ####
-    #         # decoded = self.generative_regularizer(gen_output)
-    #         # regularization_loss = beta * self.generative_model.dist_loss(decoded, eps) # map generated z back to eps
-    #         #diversity_loss=self.generative_model.diversity_loss(eps, gen_output)  # encourage different outputs
-
-    #         # Again pass generated data through discriminator
-    #         g_loss = self.discriminator_model(gen_output, y)
-    #         # Compute the generator loss based on discriminator feedback
-    #         #g_loss_adv = torch.mean(torch.nn.functional.binary_cross_entropy_with_logits(fake_score, torch.ones_like(fake_score)))
-
-    #         ######### get teacher loss ############
-    #         # teacher_loss=0
-    #         # mean_total=0
-    #         # variance_total=0
-    #         # mean_avg=0
-    #         # variance_avg=0
-    #         # teacher_logit=0
-    #         # y_input=y.unsqueeze(-1)
-    #         # for user_idx, user in enumerate(self.selected_users):
-    #         #     #user.latent_model.eval()
-    #         #     user.model.eval()
-    #         #     #weight=self.label_weights[y][:, user_idx].reshape(-1, 1)
-    #         #     #expand_weight=np.tile(weight, (1, self.unique_labels))
-    #         #     #gen_output = gen_output.permute(1, 0)
-    #         #     user_result_given_gen=user.model(gen_output,start_layer_idx=1)['output']
-    #         #     RegressionTracker2.update(user_result_given_gen.detach())
-    #         #     mean, variance = RegressionTracker2.avg_and_var()
-    #         #     mean_total+=mean
-    #         #     variance_total+=variance
-                
-    #         #     #user_output_logp_=F.log_softmax(user_result_given_gen['logit'], dim=1)
-    #         #     teacher_loss_=torch.mean(self.generative_model.dist_loss(user_result_given_gen, y_input))
-    #         #     teacher_loss+=teacher_loss_
-    #         #     #teacher_logit+=user_result_given_gen['logit'] * torch.tensor(expand_weight, dtype=torch.float32)
-    #         # mean_avg=mean_total/len(self.selected_users)
-    #         # variance_avg=variance_total/len(self.selected_users)
-    #         # ######### get student loss ############
-    #         # student_output=student_model(gen_output,start_layer_idx=1)['output']
-    #         # RegressionTracker3.update(student_output.detach())
-    #         # mean1, variance1 = RegressionTracker3.avg_and_var()
-    #         # student_loss=rkl(mean1, variance1, mean_avg, variance_avg)
-    #         # if self.ensemble_beta > 0:
-    #         #     loss=self.ensemble_alpha * teacher_loss - self.ensemble_beta * student_loss + self.ensemble_eta * diversity_loss + g_loss_adv
-    #         # else:
-    #         #     loss=self.ensemble_alpha * teacher_loss + self.ensemble_eta * diversity_loss + g_loss_adv
-    #         g_loss.backward()
-    #         self.generative_optimizer.step()
-    #         #TEACHER_LOSS += self.ensemble_alpha * teacher_loss#(torch.mean(TEACHER_LOSS.double())).item()
-    #         #STUDENT_LOSS += self.ensemble_beta * student_loss#(torch.mean(student_loss.double())).item()这一项一直没有用
-    #         #DIVERSITY_LOSS += self.ensemble_eta * diversity_loss#(torch.mean(diversity_loss.double())).item()
-    #         #return TEACHER_LOSS, STUDENT_LOSS, DIVERSITY_LOSS
-    #         return d_loss, g_loss
-
-    #     #for i in range(epoches):
-    #     d_loss, g_loss=update_generator_()
-
-    #     # TEACHER_LOSS = TEACHER_LOSS.detach().numpy() / (self.n_teacher_iters * epoches)
-    #     # STUDENT_LOSS = STUDENT_LOSS.detach().numpy() / (self.n_teacher_iters * epoches)
-    #     # DIVERSITY_LOSS = DIVERSITY_LOSS.detach().numpy() / (self.n_teacher_iters * epoches)
-    #     # info="Generator: Teacher Loss= {:.4f}, Student Loss= {:.4f}, Diversity Loss = {:.4f}, ". \
-    #     #     format(TEACHER_LOSS, STUDENT_LOSS, DIVERSITY_LOSS)
-    #     # if verbose:
-    #     #     print(info)
-    #     info="Generator Loss= {:.4f}, Discriminator Loss= {:.4f}, ". \
-    #          format(g_loss, d_loss)
-    #     print(info)
-    #     self.generative_lr_scheduler.step()
-    #     self.discriminator_lr_scheduler.step()
-
-    # # 聚合生成器模型
-    # def aggregate_models(client_models, num_clients):
-    #     aggregated_model = {}
-    #     for key in client_models[0].keys():
-    #         aggregated_model[key] = sum([client_models[i][key] for i in range(num_clients)]) / num_clients
-    #     return aggregated_model
     
     def aggregate_logits(self, selected=True):
         sum_means = 0
